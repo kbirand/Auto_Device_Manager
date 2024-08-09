@@ -303,7 +303,7 @@ namespace Hotas_Checker
         {
             timer = new System.Windows.Threading.DispatcherTimer();
             timer.Tick += Timer_Tick;
-            timer.Interval = TimeSpan.FromSeconds(10); // Increased interval to reduce unnecessary checks
+            timer.Interval = TimeSpan.FromSeconds(1); // Increased interval to reduce unnecessary checks
             timer.Start();
         }
 
