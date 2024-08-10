@@ -46,7 +46,7 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="Device Manager" Foreground="White" FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"/>
+                    <TextBlock Text="AUTO Device Manager" Foreground="White" FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"/>
                     <StackPanel Grid.Column="1" Orientation="Horizontal">
                         <Button Content="−" Click="MinimizeButton_Click" Background="Transparent" BorderThickness="0" Foreground="White" FontWeight="Bold" Width="40"/>
                         <Button Content="✕" Click="CloseButton_Click" Background="Transparent" BorderThickness="0" Foreground="White" FontWeight="Bold" Width="40"/>
