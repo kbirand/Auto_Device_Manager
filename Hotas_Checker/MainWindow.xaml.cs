@@ -6,12 +6,13 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Diagnostics;
-using System.IO;
-using System.Xml.Serialization;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Security.Principal;
-using System.Timers;
+using System.Management;
+using Microsoft.Win32;
+using Newtonsoft.Json;
+using System.Collections.Generic;
 
 namespace Hotas_Checker
 {
@@ -22,6 +23,11 @@ namespace Hotas_Checker
         private const string DEVICES_FILE = "devices.xml";
         private const string SETTINGS_FILE = "settings.xml";
         private const int DEBOUNCE_DELAY_MS = 5000; // 5 seconds debounce delay
+        private const string REGISTRY_KEY = @"SOFTWARE\HotasChecker";
+        private const string AUTO_ENABLE_DISABLE_VALUE = "AutoEnableDisable";
+        private const string DEVICES_VALUE = "Devices";
+        private ManagementEventWatcher watcher;
+        private bool _isEnforcingStates = false;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct SP_DEVINFO_DATA
@@ -69,7 +75,6 @@ namespace Hotas_Checker
 
         public MainWindow()
         {
-
             if (!IsAdministrator())
             {
                 MessageBox.Show("This application requires administrative privileges to function properly. Please run as administrator.", "Admin Rights Required", MessageBoxButton.OK, MessageBoxImage.Warning);
@@ -77,16 +82,79 @@ namespace Hotas_Checker
             }
 
             InitializeComponent();
+            Debug.WriteLine("MainWindow constructor started");
+
+            // Initialize Devices as an empty collection
             Devices = new ObservableCollection<UsbDevice>();
             DeviceListBox.ItemsSource = Devices;
 
-            LoadDevices();
-            LoadSettings();
-            MonitorDevices();
+            SetupWakeEventHandler();
 
-            if (AutoEnableDisableCheckBox.IsChecked == true)
+            LoadSettings().ContinueWith(_ =>
             {
-                EnableAllDevices();
+                Dispatcher.Invoke(() =>
+                {
+                    MonitorDevices();
+                });
+            });
+
+            Debug.WriteLine("MainWindow constructor completed");
+        }
+
+
+        private void SetupWakeEventHandler()
+        {
+            try
+            {
+                WqlEventQuery query = new WqlEventQuery("SELECT * FROM Win32_PowerManagementEvent WHERE EventType = 7");
+                watcher = new ManagementEventWatcher(query);
+                watcher.EventArrived += new EventArrivedEventHandler(HandleWakeEvent);
+                watcher.Start();
+                Debug.WriteLine("Wake event handler set up successfully");
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to set up wake event handler: {ex.Message}");
+                MessageBox.Show($"Failed to set up wake event handler: {ex.Message}");
+            }
+        }
+
+
+        private void HandleWakeEvent(object sender, EventArrivedEventArgs e)
+        {
+            Debug.WriteLine("Wake event detected");
+            Dispatcher.Invoke(async () =>
+            {
+                await Task.Delay(1000);
+                Debug.WriteLine($"Auto-disable is {(AutoEnableDisableCheckBox.IsChecked == true ? "enabled" : "disabled")}");
+                if (AutoEnableDisableCheckBox.IsChecked == true)
+                {
+                    Debug.WriteLine("Enforcing device states after wake event");
+                    await DisableAllDevices();
+                }
+                else
+                {
+                    Debug.WriteLine("Auto-disable is not enabled, not enforcing device states");
+                }
+            });
+        }
+
+        private void EnforceDeviceStates()
+        {
+            if (_isEnforcingStates)
+                return;
+
+            _isEnforcingStates = true;
+            try
+            {
+                foreach (var device in Devices)
+                {
+                    SetDeviceEnabled(device.DeviceId, device.IsActive);
+                }
+            }
+            finally
+            {
+                _isEnforcingStates = false;
             }
         }
 
@@ -115,63 +183,183 @@ namespace Hotas_Checker
             }
         }
 
-        private void LoadSettings()
+        private async Task LoadSettings()
         {
-            if (File.Exists(SETTINGS_FILE))
+            Debug.WriteLine("LoadSettings started");
+            try
             {
-                try
+                using (RegistryKey key = Registry.CurrentUser.OpenSubKey(REGISTRY_KEY, true))  // Open with write access
                 {
-                    string content = File.ReadAllText(SETTINGS_FILE);
-                    AutoEnableDisableCheckBox.IsChecked = bool.Parse(content);
+                    if (key != null)
+                    {
+                        // Load Auto-Enable/Disable setting
+                        object autoEnableDisableValue = key.GetValue(AUTO_ENABLE_DISABLE_VALUE);
+                        Debug.WriteLine($"Loaded AUTO_ENABLE_DISABLE_VALUE: {autoEnableDisableValue}");
+                        if (autoEnableDisableValue is int intValue)
+                        {
+                            AutoEnableDisableCheckBox.IsChecked = intValue != 0;
+                            Debug.WriteLine($"Set AutoEnableDisableCheckBox.IsChecked to: {AutoEnableDisableCheckBox.IsChecked}");
+                        }
+                        else
+                        {
+                            AutoEnableDisableCheckBox.IsChecked = false;
+                            Debug.WriteLine("Set AutoEnableDisableCheckBox.IsChecked to false (default)");
+                        }
+
+                        // Load Devices
+                        object devicesValue = key.GetValue(DEVICES_VALUE);
+                        Debug.WriteLine($"Loaded DEVICES_VALUE: {devicesValue}");
+                        if (devicesValue is string devicesJson && !string.IsNullOrEmpty(devicesJson))
+                        {
+                            try
+                            {
+                                var loadedDevices = JsonConvert.DeserializeObject<List<UsbDevice>>(devicesJson);
+                                Debug.WriteLine($"Deserialized devices count: {loadedDevices?.Count ?? 0}");
+                                if (loadedDevices != null && loadedDevices.Any())
+                                {
+                                    Devices.Clear();
+                                    foreach (var device in loadedDevices)
+                                    {
+                                        Devices.Add(device);
+                                        Debug.WriteLine($"Added device: {device.Name}, ID: {device.DeviceId}");
+                                    }
+                                }
+                                else
+                                {
+                                    Debug.WriteLine("No devices loaded from registry");
+                                }
+                            }
+                            catch (JsonException ex)
+                            {
+                                Debug.WriteLine($"Error deserializing devices: {ex.Message}");
+                            }
+                        }
+                        else
+                        {
+                            Debug.WriteLine("No devices value found in registry");
+                        }
+                    }
+                    else
+                    {
+                        AutoEnableDisableCheckBox.IsChecked = false;
+                        Debug.WriteLine("Registry key not found, set AutoEnableDisableCheckBox.IsChecked to false");
+                    }
                 }
-                catch (Exception ex)
+
+                // Update UI
+                DeviceListBox.ItemsSource = null;
+                DeviceListBox.ItemsSource = Devices;
+                Debug.WriteLine($"Updated DeviceListBox.ItemsSource, Devices count: {Devices.Count}");
+
+                // Apply device states
+                if (AutoEnableDisableCheckBox.IsChecked == true)
                 {
-                    Debug.WriteLine($"Error loading settings: {ex.Message}");
-                    // Silently fail and use default value
-                    AutoEnableDisableCheckBox.IsChecked = false;
+                    Debug.WriteLine("Calling EnableAllDevices");
+                    await EnableAllDevices();
+                }
+                else
+                {
+                    Debug.WriteLine("Calling DisableAllDevices");
+                    await DisableAllDevices();
                 }
             }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to load settings: {ex.Message}");
+                MessageBox.Show($"Failed to load settings: {ex.Message}");
+                AutoEnableDisableCheckBox.IsChecked = false;
+            }
+
+            // Ensure the UI is updated
+            await UpdateDeviceStatusAsync();
+            Debug.WriteLine("Finished LoadSettings");
         }
 
         private void SaveSettings()
         {
+            Debug.WriteLine("SaveSettings started");
             try
             {
-                File.WriteAllText(SETTINGS_FILE, AutoEnableDisableCheckBox.IsChecked.ToString());
+                using (RegistryKey key = Registry.CurrentUser.CreateSubKey(REGISTRY_KEY))
+                {
+                    bool autoEnableDisableValue = AutoEnableDisableCheckBox.IsChecked ?? false;
+                    key.SetValue(AUTO_ENABLE_DISABLE_VALUE, autoEnableDisableValue ? 1 : 0, RegistryValueKind.DWord);
+                    Debug.WriteLine($"Saved AUTO_ENABLE_DISABLE_VALUE: {autoEnableDisableValue}");
+
+                    if (Devices != null && Devices.Any())
+                    {
+                        string devicesJson = JsonConvert.SerializeObject(Devices);
+                        key.SetValue(DEVICES_VALUE, devicesJson, RegistryValueKind.String);
+                        Debug.WriteLine($"Saved DEVICES_VALUE: {devicesJson}");
+                        Debug.WriteLine($"Saved Devices count: {Devices.Count}");
+                    }
+                    else
+                    {
+                        Debug.WriteLine("No devices to save, keeping existing registry value");
+                        if (key.GetValue(DEVICES_VALUE) == null)
+                        {
+                            key.SetValue(DEVICES_VALUE, "[]", RegistryValueKind.String);
+                            Debug.WriteLine("Set empty array for DEVICES_VALUE");
+                        }
+                    }
+                }
+                Debug.WriteLine("Settings saved successfully");
             }
             catch (Exception ex)
             {
-                Debug.WriteLine($"Error saving settings: {ex.Message}");
-                // Silently fail as the functionality still works
+                Debug.WriteLine($"Failed to save settings: {ex.Message}");
+                MessageBox.Show($"Failed to save settings: {ex.Message}");
             }
         }
 
-        private async void EnableAllDevices()
+        private async Task EnableAllDevices()
         {
+            Debug.WriteLine("EnableAllDevices started");
+            if (Devices == null)
+            {
+                Debug.WriteLine("Devices is null, initializing as empty collection");
+                Devices = new ObservableCollection<UsbDevice>();
+            }
+
             foreach (var device in Devices)
             {
+                Debug.WriteLine($"Enabling device: {device.Name}, ID: {device.DeviceId}");
                 await SetDeviceEnabledAsync(device.DeviceId, true);
+                device.IsActive = true;
             }
             await UpdateDeviceStatusAsync();
+            Debug.WriteLine("EnableAllDevices completed");
         }
 
         private async Task DisableAllDevices()
         {
+            Debug.WriteLine("DisableAllDevices started");
+            if (Devices == null)
+            {
+                Debug.WriteLine("Devices is null, initializing as empty collection");
+                Devices = new ObservableCollection<UsbDevice>();
+            }
+
             foreach (var device in Devices)
             {
+                Debug.WriteLine($"Disabling device: {device.Name}, ID: {device.DeviceId}");
                 await SetDeviceEnabledAsync(device.DeviceId, false);
+                device.IsActive = false;
             }
             await UpdateDeviceStatusAsync();
+            Debug.WriteLine("DisableAllDevices completed");
         }
 
-        private void AutoEnableDisableCheckBox_Checked(object sender, RoutedEventArgs e)
+        private async void AutoEnableDisableCheckBox_Checked(object sender, RoutedEventArgs e)
         {
-            ScheduleSettingsSave();
+            await EnableAllDevices();
+            SaveSettings();
         }
 
-        private void AutoEnableDisableCheckBox_Unchecked(object sender, RoutedEventArgs e)
+        private async void AutoEnableDisableCheckBox_Unchecked(object sender, RoutedEventArgs e)
         {
-            ScheduleSettingsSave();
+            await DisableAllDevices();
+            SaveSettings();
         }
 
         private void ScheduleSettingsSave()
@@ -194,6 +382,7 @@ namespace Hotas_Checker
         private async Task SetDeviceEnabledAsync(string deviceId, bool enable)
         {
             string action = enable ? "Enable" : "Disable";
+            Debug.WriteLine($"SetDeviceEnabledAsync started: {action} device {deviceId}");
             string command = $"Get-PnpDevice -InstanceId '{deviceId}' | {action}-PnpDevice -Confirm:$false";
 
             try
@@ -215,6 +404,7 @@ namespace Hotas_Checker
 
                     if (process.ExitCode != 0)
                     {
+                        Debug.WriteLine($"Failed to {action.ToLower()} device. Error: {error}");
                         MessageBox.Show($"Failed to {action.ToLower()} device. Error: {error}");
                     }
                     else
@@ -225,53 +415,57 @@ namespace Hotas_Checker
             }
             catch (Exception ex)
             {
+                Debug.WriteLine($"An error occurred while trying to {action.ToLower()} the device: {ex.Message}");
                 MessageBox.Show($"An error occurred while trying to {action.ToLower()} the device: {ex.Message}");
             }
+            Debug.WriteLine($"SetDeviceEnabledAsync completed: {action} device {deviceId}");
         }
 
 
         protected override async void OnClosing(CancelEventArgs e)
         {
-            _saveSettingsTimer?.Dispose();
-
+            Debug.WriteLine("OnClosing started");
             if (AutoEnableDisableCheckBox.IsChecked == true)
             {
+                Debug.WriteLine("Auto-disable is enabled, disabling all devices");
                 e.Cancel = true; // Temporarily cancel the closing event
-                await DisableAllDevices();
+
+                foreach (var device in Devices)
+                {
+                    Debug.WriteLine($"Disabling device: {device.Name}, ID: {device.DeviceId}");
+                    await SetDeviceEnabledAsync(device.DeviceId, false);
+                    device.IsActive = false;
+                }
+
+                await UpdateDeviceStatusAsync();
+                Debug.WriteLine("All devices disabled");
+
+                SaveSettings();
+                Debug.WriteLine("Settings saved");
+            }
+            else
+            {
+                Debug.WriteLine("Auto-disable is not enabled, saving settings");
+                SaveSettings();
             }
 
-            SaveDevices();
-            SaveSettings();
-            base.OnClosing(e);
+            watcher?.Stop();
+            Debug.WriteLine("Wake event watcher stopped");
 
             if (e.Cancel)
             {
+                Debug.WriteLine("Closing was temporarily cancelled, now shutting down the application");
                 Application.Current.Shutdown(); // Force the application to close after disabling devices
             }
-        }
-
-
-        private void LoadDevices()
-        {
-            if (File.Exists(DEVICES_FILE))
+            else
             {
-                XmlSerializer serializer = new XmlSerializer(typeof(ObservableCollection<UsbDevice>));
-                using (FileStream fs = new FileStream(DEVICES_FILE, FileMode.Open))
-                {
-                    Devices = (ObservableCollection<UsbDevice>)serializer.Deserialize(fs);
-                }
-                DeviceListBox.ItemsSource = Devices;
+                base.OnClosing(e);
             }
+            Debug.WriteLine("OnClosing completed");
         }
 
-        private void SaveDevices()
-        {
-            XmlSerializer serializer = new XmlSerializer(typeof(ObservableCollection<UsbDevice>));
-            using (FileStream fs = new FileStream(DEVICES_FILE, FileMode.Create))
-            {
-                serializer.Serialize(fs, Devices);
-            }
-        }
+
+
 
         private void AddNewDevice_Click(object sender, RoutedEventArgs e)
         {
@@ -282,7 +476,9 @@ namespace Hotas_Checker
                 if (selectedDevice != null && !Devices.Any(d => d.DeviceId == selectedDevice.DeviceId))
                 {
                     Devices.Add(selectedDevice);
-                    SaveDevices();
+                    Debug.WriteLine($"Added new device: {selectedDevice.Name}, ID: {selectedDevice.DeviceId}");
+                    SaveSettings();
+                    Debug.WriteLine("SaveSettings called after adding new device");
                 }
             }
         }
@@ -295,15 +491,15 @@ namespace Hotas_Checker
             if (MessageBox.Show($"Are you sure you want to remove {device.Name}?", "Confirm Removal", MessageBoxButton.YesNo) == MessageBoxResult.Yes)
             {
                 Devices.Remove(device);
-                SaveDevices();
+                SaveSettings();
             }
         }
 
         private void MonitorDevices()
         {
-            timer = new System.Windows.Threading.DispatcherTimer();
+            var timer = new System.Windows.Threading.DispatcherTimer();
             timer.Tick += Timer_Tick;
-            timer.Interval = TimeSpan.FromSeconds(1); // Increased interval to reduce unnecessary checks
+            timer.Interval = TimeSpan.FromSeconds(1);
             timer.Start();
         }
 
@@ -319,22 +515,15 @@ namespace Hotas_Checker
                 bool isConnected = await IsDeviceConnectedAsync(device.DeviceId);
                 if (isConnected != device.IsConnected)
                 {
-                    // Wait for the debounce period before updating the status
-                    await Task.Delay(DEBOUNCE_DELAY_MS);
-                    isConnected = await IsDeviceConnectedAsync(device.DeviceId);
-
-                    if (isConnected != device.IsConnected)
+                    device.IsConnected = isConnected;
+                    if (isConnected)
                     {
-                        device.IsConnected = isConnected;
-                        if (isConnected)
-                        {
-                            bool isEnabled = await IsDeviceEnabledAsync(device.DeviceId);
-                            device.IsActive = isEnabled;
-                        }
-                        else
-                        {
-                            device.IsActive = false;
-                        }
+                        bool isEnabled = await IsDeviceEnabledAsync(device.DeviceId);
+                        device.IsActive = isEnabled;
+                    }
+                    else
+                    {
+                        device.IsActive = false;
                     }
                 }
             }
@@ -431,7 +620,6 @@ namespace Hotas_Checker
             if (device != null)
             {
                 SetDeviceEnabled(device.DeviceId, true);
-                // The actual state will be updated in UpdateDeviceStatus
             }
         }
 
@@ -442,7 +630,6 @@ namespace Hotas_Checker
             if (device != null)
             {
                 SetDeviceEnabled(device.DeviceId, false);
-                // The actual state will be updated in UpdateDeviceStatus
             }
         }
 
