@@ -38,7 +38,7 @@ AUTO Device Manager is a Windows WPF application designed to manage USB devices,
 
 - The application relies on PowerShell commands to enable and disable devices.
 - Device status updates may be delayed due to debounce logic to prevent false positives.
-- The application stores device and settings information in `devices.xml` and `settings.xml` files located in the application directory.
+- The application stores device and settings information in registry (\HKEY_CURRENT_USER\Software\HotasChecker).
 
 ## Contributing
 
