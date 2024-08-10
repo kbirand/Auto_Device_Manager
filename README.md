@@ -1,4 +1,6 @@
 # AUTO Device Manager
+<img height="300" alt="AUTO_Device_Manager_Tgtu5XufP6" src="https://github.com/user-attachments/assets/b5c6d438-821d-42d8-a039-09372d32d860">
+<img height="300" alt="AUTO_Device_Manager_0kAijqcJDM" src="https://github.com/user-attachments/assets/c7baf388-8ef0-4d55-84b7-17609b572a67">
 
 AUTO Device Manager is a Windows WPF application designed to manage USB devices, specifically those related to HOTAS (Hands On Throttle And Stick) setups. Since most HOTAS controllers prevent display/computer to sleep, it provides functionalities to enable, disable, auto enable.disable with launc or close and monitor the status of connected devices, ensuring that all devices are properly configured and operational.
 
